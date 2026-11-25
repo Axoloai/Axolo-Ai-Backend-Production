@@ -1,0 +1,13 @@
+.venv
+.env
+*.env
+__pycache__
+*.pyc
+.pytest_cache
+tests
+*.png
+.git
+.playwright-mcp
+snap_*.yml
+.claude
+*.log

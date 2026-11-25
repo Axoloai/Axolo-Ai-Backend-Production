@@ -1,0 +1,29 @@
+# secrets
+.env
+*.env
+!.env.example
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# editor / os
+.vscode/
+.idea/
+*.png
+
+# tests (kept local only)
+tests/
+pytest.ini
+requirements-dev.txt
+
+# browser testing / local tool output (not needed in the repo)
+.playwright-mcp/
+snap_*.yml
+.claude/
+*.log
+Thumbs.db
+desktop.ini
+.DS_Store

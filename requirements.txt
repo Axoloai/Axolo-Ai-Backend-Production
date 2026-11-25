@@ -1,0 +1,44 @@
+# Axolo Agent - agentic AI backend (serverless monolith, FastAPI, async only)
+#
+# Install:
+#   python -m venv .venv
+#   .venv\Scripts\activate
+#   pip install -r requirements.txt
+
+# Web framework - the one router the frontend calls
+fastapi==0.165.0
+
+# ASGI server - runs the app locally / in a container
+uvicorn[standard]==0.54.0
+
+# Serverless adapter - runs the same FastAPI app on AWS Lambda
+mangum==0.22.0
+
+# Async HTTP client - OAuth popups and platform APIs (GitHub, GitLab, Bitbucket, WordPress, Shopify, AWS)
+httpx==0.28.1
+
+# Settings from .env (keys, client IDs, model name)
+pydantic-settings==2.16.3
+
+# Database - PostgreSQL (async ORM + async driver)
+sqlalchemy[asyncio]==2.1.9
+asyncpg==0.32.0
+
+# Database migrations
+alembic==1.20.1
+
+# Redis - cache, sessions, locks (async client built in)
+# Kept on 5.x: arq 0.28.0 needs redis>=4.2.0,<6
+redis==5.3.1
+
+# Queue - async background jobs on Redis (agent runs, clone/build/publish)
+arq==0.28.0
+
+# Encryption - client tokens are encrypted before they are saved
+cryptography==50.0.2
+
+# Claude Agent SDK - runs the agent (reads the site, asks the client, edits, calls our tools)
+claude-agent-sdk==0.2.187
+
+# Claude API (Anthropic Python SDK) - direct Claude API calls
+anthropic==2.12.0

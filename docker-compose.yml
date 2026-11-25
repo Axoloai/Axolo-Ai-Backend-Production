@@ -1,0 +1,62 @@
+# Local stack:  docker compose up --build
+# Scale workers: docker compose up --scale worker=3
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: axolo
+      POSTGRES_PASSWORD: axolo
+      POSTGRES_DB: axolo
+    ports: ["55432:5432"]   # host port 55432 (5432 is often taken)
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U axolo -d axolo"]
+      interval: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports: ["56379:6379"]   # host port 56379 (6379 is often taken)
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 20
+
+  migrate:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://axolo:axolo@postgres:5432/axolo
+      REDIS_URL: redis://redis:6379/0
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  api:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://axolo:axolo@postgres:5432/axolo
+      REDIS_URL: redis://redis:6379/0
+    ports: ["8000:8000"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+  worker:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://axolo:axolo@postgres:5432/axolo
+      REDIS_URL: redis://redis:6379/0
+      WORK_ROOT: /work
+    command: ["arq", "app.worker.settings.WorkerSettings"]
+    deploy:
+      replicas: 2        # 2 workers: if one restarts, the other keeps running jobs
+    tmpfs: ["/work:size=4g,uid=10001,gid=10001"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+volumes:
+  pgdata:
