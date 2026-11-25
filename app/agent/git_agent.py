@@ -27,6 +27,7 @@ from claude_agent_sdk import (
 )
 
 from app.agent.git_ops import Git, GitError, rmtree, run, safe_env
+from app.agent import copied_menu
 from app.agent.prompt import KICKOFF, STEP_LABELS, SYSTEM_PROMPT, find_existing, review_change, tidy_choice
 from app.agent.session_store import PostgresSessionStore
 from app.config import Settings
@@ -132,7 +133,26 @@ class GitAgentTurn:
             except GitError as e:
                 return _tool_error(f"Push failed: {e}")
 
-        return [show_my_changes, check_build, commit_and_push]
+        @tool("copy_to_all_pages", "COPIED menu only (plain HTML pages that each have their own copy of the menu): "
+                                   "after you edited ONE page, this makes the same change in every other page.",
+              {"page": str})
+        async def copy_to_all_pages(args):
+            page = str(args.get("page") or "").strip().lstrip("./")
+            if page not in ctx.edited or Path(page).suffix.lower() not in copied_menu.PAGE_EXT:
+                return _tool_error("First add the item to one .html page with Edit, then pass that page.")
+            try:
+                old = await git("show", f"HEAD:{page}")
+                updated, skipped = await asyncio.to_thread(copied_menu.spread, turn.repo_dir, page, old)
+            except (GitError, ValueError) as e:
+                return _tool_error(str(e))
+            ctx.edited.update(updated)
+            msg = f"Same change made in {len(updated)} other page(s)."
+            if skipped:
+                msg += (" Could not place it in: " + ", ".join(skipped[:20]) +
+                        ". Add the same item there yourself with Edit.")
+            return _tool_text(msg)
+
+        return [show_my_changes, check_build, commit_and_push, copy_to_all_pages]
 
     def _read_new(self, rel_path: str) -> str | None:
         """The edited file's current content (only inside this client's repo copy)."""
@@ -191,7 +211,7 @@ class GitAgentTurn:
                 tools=["Read", "Glob", "Grep", "Edit"],
                 mcp_servers={"axolo": create_sdk_mcp_server("axolo", tools=self._tools())},
                 allowed_tools=["mcp__axolo__show_my_changes", "mcp__axolo__check_build",
-                               "mcp__axolo__commit_and_push"],
+                               "mcp__axolo__commit_and_push", "mcp__axolo__copy_to_all_pages"],
                 disallowed_tools=["Bash", "Write", "WebFetch", "WebSearch", "Task", "NotebookEdit"],
                 can_use_tool=self._can_use_tool,
                 setting_sources=[],              # ignore any Claude settings on the worker
