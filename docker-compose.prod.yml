@@ -91,7 +91,8 @@ services:
     command: ["arq", "app.worker.settings.WorkerSettings"]
     deploy:
       replicas: 2
-    tmpfs: ["/work:size=4g,uid=10001,gid=10001"]
+    # exec: the client's site build runs tools from node_modules/.bin here (Docker mounts a tmpfs noexec by default).
+    tmpfs: ["/work:size=4g,uid=10001,gid=10001,exec"]
     depends_on:
       migrate: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
