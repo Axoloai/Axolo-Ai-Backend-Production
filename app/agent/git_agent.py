@@ -28,7 +28,7 @@ from claude_agent_sdk import (
 
 from app.agent.git_ops import Git, GitError, rmtree, run, safe_env
 from app.agent import copied_menu
-from app.agent.prompt import KICKOFF, STEP_LABELS, SYSTEM_PROMPT, find_existing, review_change, tidy_choice
+from app.agent.prompt import BUILD_FAILED_MESSAGE, KICKOFF, STEP_LABELS, SYSTEM_PROMPT, find_existing, review_change, tidy_choice
 from app.agent.session_store import PostgresSessionStore
 from app.config import Settings
 from app.platforms import Provider
@@ -76,6 +76,8 @@ class GitAgentTurn:
         self.base = base
         self.repo_dir = base / "repo"
         self.pushed = False          # after a push the system speaks to the client, not the agent
+        self.build_failed = False    # a failed build check ends the turn: nothing is published
+        self.built: set[Path] = set()   # app folders whose build passed since the last edit
         self.home = base / "home"
         self.git = Git(ctx.provider, ctx.token, ctx.repo, ctx.branch, self.repo_dir, self.home)
 
@@ -101,7 +103,12 @@ class GitAgentTurn:
             if not (app / "package.json").exists():
                 return _tool_text("No package.json there: static site, no build needed.")
             ok, out = await turn._build(app)
-            return _tool_text(out) if ok else _tool_error(out)
+            if ok:
+                turn.built.add(app)
+                return _tool_text(out)
+            turn.build_failed = True
+            return _tool_error("Build check failed. STOP now: do not edit or publish anything and write nothing "
+                               "more - the system tells the client.\n" + out[-1500:])
 
         @tool("commit_and_push", "Commit your change and push it to the website's branch (the hosting platform "
                                  "then deploys it). Only call after show_my_changes and check_build.",
@@ -109,6 +116,12 @@ class GitAgentTurn:
         async def commit_and_push(args):
             if not ctx.edited:
                 return _tool_text("Nothing to commit: you haven't edited any file.")
+            if turn.build_failed:
+                return _tool_text("Not published: the build check failed. Stop and write nothing more.")
+            unbuilt = [p for p in turn._apps_to_build() if p not in turn.built]
+            if unbuilt:     # never publish a site whose build was not checked after the last edit
+                rel = unbuilt[0].relative_to(turn.repo_dir.resolve()).as_posix() or "."
+                return _tool_text(f"Not published: call check_build with app_dir '{rel}' first.")
             try:
                 # code-level guard: ONLY the Team Portal link, ONLY in the nav / footer / side nav
                 wide = await git("diff", "-U15", "--", *sorted(ctx.edited))
@@ -146,6 +159,7 @@ class GitAgentTurn:
             except (GitError, ValueError) as e:
                 return _tool_error(str(e))
             ctx.edited.update(updated)
+            turn.built.clear()
             msg = f"Same change made in {len(updated)} other page(s)."
             if skipped:
                 msg += (" Could not place it in: " + ", ".join(skipped[:20]) +
@@ -153,6 +167,21 @@ class GitAgentTurn:
             return _tool_text(msg)
 
         return [show_my_changes, check_build, commit_and_push, copy_to_all_pages]
+
+    def _apps_to_build(self) -> set[Path]:
+        """The app folder (nearest package.json above it) of every edited file. Plain HTML: none."""
+        root = self.repo_dir.resolve()
+        apps = set()
+        for rel in self.ctx.edited:
+            d = (root / rel).resolve().parent
+            while _inside(root, d):
+                if (d / "package.json").exists():
+                    apps.add(d)
+                    break
+                if d == root:
+                    break
+                d = d.parent
+        return apps
 
     def _read_new(self, rel_path: str) -> str | None:
         """The edited file's current content (only inside this client's repo copy)."""
@@ -192,7 +221,10 @@ class GitAgentTurn:
             if tool_name in _EDIT_TOOLS:
                 if _BLOCKED_DIRS & rel_parts:
                     return PermissionResultDeny(message="You may only edit the website's own source files.")
+                if self.build_failed:
+                    return PermissionResultDeny(message="The build check failed: stop, edit nothing more.")
                 self.ctx.edited.add(p.relative_to(root).as_posix())
+                self.built.clear()
             return PermissionResultAllow()
         return PermissionResultDeny(message=f"{tool_name} is not available to you.")
 
@@ -235,12 +267,14 @@ class GitAgentTurn:
                     if isinstance(msg, AssistantMessage):
                         for b in msg.content:
                             if isinstance(b, TextBlock) and b.text.strip():
-                                if not self.pushed:      # no "…deploying now" from the agent: the system says it
+                                if not self.pushed and not self.build_failed:   # then the system speaks
                                     await ctx.say("agent", tidy_choice(b.text))
                             elif isinstance(b, ToolUseBlock):
                                 await ctx.say("step", STEP_LABELS.get(b.name, "Working…"))
-                    elif isinstance(msg, ResultMessage) and msg.is_error:
+                    elif isinstance(msg, ResultMessage) and msg.is_error and not self.build_failed:
                         await ctx.say("system", "The agent stopped with an error. Please try again.")
+            if self.build_failed and not self.pushed:
+                await ctx.say("agent", BUILD_FAILED_MESSAGE)
         finally:
             await asyncio.to_thread(rmtree, self.base)
 
