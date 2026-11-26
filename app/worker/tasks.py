@@ -284,6 +284,10 @@ async def agent_turn(ctx: dict, job_id: str, client_id: str, session_id: str, me
 
         async with sm() as db:
             await finish_job(db, job_id, "done")
+            if turn.gave_up and pushed_change is None:
+                # nothing could be added: close now (nothing published). The chat then offers the snippet.
+                await close_session(db, await get_session(db, client_id, session_id, for_update=True), redis)
+                return "closed: nothing added"
         if pushed_change is not None:
             # watch the live website: "Done ✓ Team Portal is live" only once it really shows there
             await _after_push(redis, client_id, session_id, job_id, pushed_change, "change", True,

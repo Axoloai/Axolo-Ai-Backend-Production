@@ -28,7 +28,7 @@ from claude_agent_sdk import (
 
 from app.agent.git_ops import Git, GitError, rmtree, run, safe_env
 from app.agent import copied_menu
-from app.agent.prompt import KICKOFF, STEP_LABELS, SYSTEM_PROMPT, find_existing, review_change, tidy_choice
+from app.agent.prompt import BUILD_FAILED_MESSAGE, KICKOFF, NOTHING_ADDED_MESSAGE, STEP_LABELS, SYSTEM_PROMPT, find_existing, review_change, tidy_choice
 from app.agent.session_store import PostgresSessionStore
 from app.config import Settings
 from app.platforms import Provider
@@ -76,6 +76,9 @@ class GitAgentTurn:
         self.base = base
         self.repo_dir = base / "repo"
         self.pushed = False          # after a push the system speaks to the client, not the agent
+        self.build_failed = False    # a failed build check ends the turn: nothing is published
+        self.gave_up = False         # nothing can be added: the system tells the client and closes the session
+        self.built: set[Path] = set()   # app folders whose build passed since the last edit
         self.home = base / "home"
         self.git = Git(ctx.provider, ctx.token, ctx.repo, ctx.branch, self.repo_dir, self.home)
 
@@ -101,7 +104,12 @@ class GitAgentTurn:
             if not (app / "package.json").exists():
                 return _tool_text("No package.json there: static site, no build needed.")
             ok, out = await turn._build(app)
-            return _tool_text(out) if ok else _tool_error(out)
+            if ok:
+                turn.built.add(app)
+                return _tool_text(out)
+            turn.build_failed = True
+            return _tool_error("Build check failed. STOP now: do not edit or publish anything and write nothing "
+                               "more - the system tells the client.\n" + out[-1500:])
 
         @tool("commit_and_push", "Commit your change and push it to the website's branch (the hosting platform "
                                  "then deploys it). Only call after show_my_changes and check_build.",
@@ -109,6 +117,12 @@ class GitAgentTurn:
         async def commit_and_push(args):
             if not ctx.edited:
                 return _tool_text("Nothing to commit: you haven't edited any file.")
+            if turn.build_failed:
+                return _tool_text("Not published: the build check failed. Stop and write nothing more.")
+            unbuilt = [p for p in turn._apps_to_build() if p not in turn.built]
+            if unbuilt:     # never publish a site whose build was not checked after the last edit
+                rel = unbuilt[0].relative_to(turn.repo_dir.resolve()).as_posix() or "."
+                return _tool_text(f"Not published: call check_build with app_dir '{rel}' first.")
             try:
                 # code-level guard: ONLY the Team Portal link, ONLY in the nav / footer / side nav
                 wide = await git("diff", "-U15", "--", *sorted(ctx.edited))
@@ -146,13 +160,38 @@ class GitAgentTurn:
             except (GitError, ValueError) as e:
                 return _tool_error(str(e))
             ctx.edited.update(updated)
+            turn.built.clear()
             msg = f"Same change made in {len(updated)} other page(s)."
             if skipped:
                 msg += (" Could not place it in: " + ", ".join(skipped[:20]) +
                         ". Add the same item there yourself with Edit.")
             return _tool_text(msg)
 
-        return [show_my_changes, check_build, commit_and_push, copy_to_all_pages]
+        @tool("nothing_can_be_added", "Call when the Team Portal link can't be added anywhere (every place failed, the "
+                                      "client said no, or the site has no top menu and no footer). The system tells "
+                                      "the client and closes the session. Write nothing more after it.", {})
+        async def nothing_can_be_added(_args):
+            if turn.pushed:
+                return _tool_error("A change was already published in this reply: do not call this.")
+            turn.gave_up = True
+            return _tool_text("OK. Write nothing more.")
+
+        return [show_my_changes, check_build, commit_and_push, copy_to_all_pages, nothing_can_be_added]
+
+    def _apps_to_build(self) -> set[Path]:
+        """The app folder (nearest package.json above it) of every edited file. Plain HTML: none."""
+        root = self.repo_dir.resolve()
+        apps = set()
+        for rel in self.ctx.edited:
+            d = (root / rel).resolve().parent
+            while _inside(root, d):
+                if (d / "package.json").exists():
+                    apps.add(d)
+                    break
+                if d == root:
+                    break
+                d = d.parent
+        return apps
 
     def _read_new(self, rel_path: str) -> str | None:
         """The edited file's current content (only inside this client's repo copy)."""
@@ -192,7 +231,10 @@ class GitAgentTurn:
             if tool_name in _EDIT_TOOLS:
                 if _BLOCKED_DIRS & rel_parts:
                     return PermissionResultDeny(message="You may only edit the website's own source files.")
+                if self.build_failed:
+                    return PermissionResultDeny(message="The build check failed: stop, edit nothing more.")
                 self.ctx.edited.add(p.relative_to(root).as_posix())
+                self.built.clear()
             return PermissionResultAllow()
         return PermissionResultDeny(message=f"{tool_name} is not available to you.")
 
@@ -211,7 +253,8 @@ class GitAgentTurn:
                 tools=["Read", "Glob", "Grep", "Edit"],
                 mcp_servers={"axolo": create_sdk_mcp_server("axolo", tools=self._tools())},
                 allowed_tools=["mcp__axolo__show_my_changes", "mcp__axolo__check_build",
-                               "mcp__axolo__commit_and_push", "mcp__axolo__copy_to_all_pages"],
+                               "mcp__axolo__commit_and_push", "mcp__axolo__copy_to_all_pages",
+                               "mcp__axolo__nothing_can_be_added"],
                 disallowed_tools=["Bash", "Write", "WebFetch", "WebSearch", "Task", "NotebookEdit"],
                 can_use_tool=self._can_use_tool,
                 setting_sources=[],              # ignore any Claude settings on the worker
@@ -229,18 +272,32 @@ class GitAgentTurn:
             if note:
                 prompt = f"[{note}]\n\n{prompt}"
 
+            # The agent's words are held until the turn ends: if it pushed, gave up or the build failed, the
+            # system's own message is shown instead (no "No menu exists." / "deploying now" lines before it).
+            said: list[str] = []
+            errored = False
             async with ClaudeSDKClient(options=options) as client:
                 await client.query(prompt)
                 async for msg in client.receive_response():
                     if isinstance(msg, AssistantMessage):
                         for b in msg.content:
                             if isinstance(b, TextBlock) and b.text.strip():
-                                if not self.pushed:      # no "…deploying now" from the agent: the system says it
-                                    await ctx.say("agent", tidy_choice(b.text))
+                                said.append(tidy_choice(b.text))
                             elif isinstance(b, ToolUseBlock):
                                 await ctx.say("step", STEP_LABELS.get(b.name, "Working…"))
                     elif isinstance(msg, ResultMessage) and msg.is_error:
-                        await ctx.say("system", "The agent stopped with an error. Please try again.")
+                        errored = True
+            if self.pushed:
+                pass                                    # the system says "deploying" after the push
+            elif self.build_failed:
+                await ctx.say("agent", BUILD_FAILED_MESSAGE)
+            elif self.gave_up:
+                await ctx.say("agent", NOTHING_ADDED_MESSAGE)
+            else:
+                if said:        # only the final message (the question or answer), no "I'm adding…" chatter
+                    await ctx.say("agent", said[-1])
+                if errored:
+                    await ctx.say("system", "The agent stopped with an error. Please try again.")
         finally:
             await asyncio.to_thread(rmtree, self.base)
 

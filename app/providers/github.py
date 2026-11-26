@@ -1,4 +1,5 @@
 """GitHub: login popup (OAuth), token exchange, repositories, live site link. Async (httpx)."""
+import re
 import urllib.parse
 
 import httpx
@@ -107,8 +108,14 @@ async def list_branches(token: str, full_name: str, default_branch: str) -> list
             names += [b["name"] for b in r.json()]
             url = r.links.get("next", {}).get("url")
     names = names[:MAX_BRANCHES]
-    ordered = ([default_branch] if default_branch in names else []) + sorted(n for n in names if n != default_branch)
+    ordered = ([default_branch] if default_branch in names else []) + sorted(
+        (n for n in names if n != default_branch), key=_natural)
     return [{"name": n, "default": n == default_branch} for n in ordered]
+
+
+def _natural(name: str) -> list:
+    """Number order: branch2, branch4, branch10 (not branch10, branch2, branch4)."""
+    return [(0, int(p), "") if p.isdigit() else (1, 0, p.lower()) for p in re.split(r"(\d+)", name)]
 
 
 async def find_live_url(token: str, full_name: str) -> str | None:
