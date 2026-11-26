@@ -1,0 +1,8 @@
+# HTTPS in front of the agent api (docker-compose.prod.yml). Caddy gets and renews the certificate for AGENT_DOMAIN by
+# itself, and sends plain http to https. AGENT_DOMAIN must already point at this server in DNS when Caddy starts, or
+# the certificate cannot be issued.
+{$AGENT_DOMAIN} {
+	encode gzip
+	header Strict-Transport-Security "max-age=31536000"
+	reverse_proxy api:8000
+}
